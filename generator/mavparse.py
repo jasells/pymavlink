@@ -233,6 +233,8 @@ class MAVXML(object):
         self.parse_time = time.strftime("%a %b %d %Y")
         self.version = 2
         self.include = []
+        # optional <namespace>: where generators with namespaces (C# split layout) put this dialect
+        self.namespace = None
         self.wire_protocol_version = wire_protocol_version
 
         # every protocol we still support is little-endian, sorts its base
@@ -413,6 +415,8 @@ class MAVXML(object):
                 self.version = int(data)
             elif in_element == "mavlink.include":
                 self.include[-1] += data
+            elif in_element == "mavlink.namespace":
+                self.namespace = (self.namespace or '') + data
 
         f = open(filename, mode='rb')
         p = xml.parsers.expat.ParserCreate()

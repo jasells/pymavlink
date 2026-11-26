@@ -260,8 +260,14 @@ def mavgen(opts, args):
         from . import mavgen_wlua
         mavgen_wlua.generate(opts.output, xml)
     elif opts.language == 'cs':
-        from . import mavgen_cs
-        mavgen_cs.generate(opts.output, xml)
+        if getattr(opts, 'cs_layout', 'legacy') == 'split':
+            from . import mavgen_cs_split
+            mavgen_cs_split.generate(opts.output, xml,
+                                     emit=getattr(opts, 'cs_emit', 'all'),
+                                     namespace_root=getattr(opts, 'cs_namespace_root', 'MavLink.Net'))
+        else:
+            from . import mavgen_cs
+            mavgen_cs.generate(opts.output, xml)
     elif (opts.language == 'javascript' ) or ( opts.language == 'javascript_stable' ):
         from . import mavgen_javascript_stable as mavgen_javascript
         mavgen_javascript.generate(opts.output, xml)
@@ -302,7 +308,11 @@ def mavgen(opts, args):
 
 # build all the dialects in the dialects subpackage
 class Opts(object):
-    def __init__(self, output, wire_protocol=DEFAULT_WIRE_PROTOCOL, language=DEFAULT_LANGUAGE, validate=DEFAULT_VALIDATE, strict_units=DEFAULT_STRICT_UNITS):
+    def __init__(self, output, wire_protocol=DEFAULT_WIRE_PROTOCOL, language=DEFAULT_LANGUAGE, validate=DEFAULT_VALIDATE, strict_units=DEFAULT_STRICT_UNITS,
+                 cs_layout='legacy', cs_emit='all', cs_namespace_root='MavLink.Net'):
+        self.cs_layout = cs_layout
+        self.cs_emit = cs_emit
+        self.cs_namespace_root = cs_namespace_root
         self.wire_protocol = wire_protocol
         self.language = language
         self.output = output
