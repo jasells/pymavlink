@@ -264,7 +264,9 @@ def mavgen(opts, args):
             from . import mavgen_cs_split
             mavgen_cs_split.generate(opts.output, xml,
                                      emit=getattr(opts, 'cs_emit', 'all'),
-                                     namespace_root=getattr(opts, 'cs_namespace_root', 'MavLink.Net'))
+                                     namespace_root=getattr(opts, 'cs_namespace_root', 'MavLink.Net'),
+                                     check_paths=getattr(opts, 'cs_check_against', None),
+                                     root_namespace=getattr(opts, 'cs_namespace', None))
         else:
             from . import mavgen_cs
             mavgen_cs.generate(opts.output, xml)
@@ -309,8 +311,10 @@ def mavgen(opts, args):
 # build all the dialects in the dialects subpackage
 class Opts(object):
     def __init__(self, output, wire_protocol=DEFAULT_WIRE_PROTOCOL, language=DEFAULT_LANGUAGE, validate=DEFAULT_VALIDATE, strict_units=DEFAULT_STRICT_UNITS,
-                 cs_layout='legacy', cs_emit='all', cs_namespace_root='MavLink.Net'):
+                 cs_layout='legacy', cs_emit='all', cs_namespace_root='MavLink.Net', cs_check_against=None, cs_namespace=None):
         self.cs_layout = cs_layout
+        self.cs_namespace = cs_namespace
+        self.cs_check_against = cs_check_against
         self.cs_emit = cs_emit
         self.cs_namespace_root = cs_namespace_root
         self.wire_protocol = wire_protocol

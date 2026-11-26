@@ -27,6 +27,8 @@ parser.add_argument("--strict-units", action="store_true", dest="strict_units", 
 parser.add_argument("--cs-layout", choices=["legacy", "split"], default="legacy", help="C# only: 'legacy' is the single mavlink.cs (unchanged); 'split' is one file and namespace per XML file, for MavLink.Net. [default: %(default)s]")
 parser.add_argument("--cs-emit", choices=["root", "all"], default="all", help="C# split layout only: generate the root XML file only, or every file in its include closure. [default: %(default)s]")
 parser.add_argument("--cs-namespace-root", default="MavLink.Net", help="C# split layout only: namespace root for dialects without a <namespace> element: <root>.Dialects.<Name>. [default: %(default)s]")
+parser.add_argument("--cs-namespace", default=None, help="C# split layout only: namespace for the root XML file, overriding its <namespace> element. Included files keep their own <namespace> or the default rule.")
+parser.add_argument("--cs-check-against", action="append", metavar="XML", default=None, help="C# split layout only (repeatable): another dialect XML file (with its includes) to check for message id and MAV_CMD collisions. Collisions are printed as warnings; generation still succeeds.")
 parser.add_argument("definitions", metavar="XML", nargs="+", help="MAVLink definitions")
 args = parser.parse_args()
 

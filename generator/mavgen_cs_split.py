@@ -9,12 +9,17 @@ Differences from the legacy layout (mavgen_cs.py, which is left unchanged):
   * message structs implement MavLink.Net.IMavlinkMessage<T> (id, CRC_EXTRA, lengths, name)
   * every payload struct is unmanaged: array fields are private fixed-size buffers exposed as a
     public Span<T> property ([UnscopedRef]), so reading and writing never allocates and consuming
-    code needs no unsafe context; char[N] fields also get a <name>_string property
+    code needs no unsafe context; char[N] fields are text: <name> is a string property and
+    <name>_span the raw bytes
   * enum-typed fields are typed, with a deterministic underlying type per enum (the widest
     unsigned width any field uses); fields of another width keep their wire type and get a
     checked typed accessor
   * an enum extended by several files is emitted once per file, with only that file's entries
-  * a per-dialect MessageId enum and an IMavlinkDialect with self-registration
+  * a per-dialect MessageId enum and an IMavlinkDialect, registered explicitly by the application
+    (no module initializer, so registration order is call order)
+  * optional --cs-namespace: the root XML file's namespace only (includes keep theirs)
+  * optional --cs-check-against: warn about message ids and MAV_CMD values defined differently in
+    other dialects
   * no template files are copied
 
 Released under GNU GPL version 3 or later, as the rest of the generator. Generated output is not
@@ -278,13 +283,25 @@ def field_plan(m, f, models):
         # so `unsafe` never reaches consuming code. [UnscopedRef] lets the compiler stop the span from
         # outliving the struct variable. The property comes first so the doc comment and attributes
         # attach to it; the private buffer follows in its wire position (properties don't affect layout).
+        # char[N] fields are text: the plain name is a string property, and the raw bytes are a span
+        # under text_span_name().
         storage = '_' + f.name
+        n = f.array_length
+        if f.type == 'char':
+            return [
+                'public string %s' % name,
+                '{',
+                '    readonly get { fixed (byte* p = %s) return %s.MavlinkText.Decode(new global::System.ReadOnlySpan<byte>(p, %u)); }' % (storage, CORE, n),
+                '    set { fixed (byte* p = %s) %s.MavlinkText.Encode(value, new global::System.Span<byte>(p, %u)); }' % (storage, CORE, n),
+                '}',
+                'private fixed byte %s[%u];' % (storage, n),
+            ], text_span_accessor(m, f, storage)
         return [
             '[global::System.Diagnostics.CodeAnalysis.UnscopedRef]',
             'public global::System.Span<%s> %s => global::System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref %s[0], %u);'
-            % (cs, name, storage, f.array_length),
-            'private fixed %s %s[%u];' % (cs, storage, f.array_length),
-        ], array_accessors(f, cs, storage)
+            % (cs, name, storage, n),
+            'private fixed %s %s[%u];' % (cs, storage, n),
+        ], []
 
     model = models.get(f.enum) if f.enum else None
     if model is None or cs not in INTEGER_SIZES:
@@ -309,19 +326,26 @@ def field_plan(m, f, models):
     ]
 
 
-def array_accessors(f, cs, storage):
-    '''extra members for an array field. The span property covers element access and copying; char[N]
-    fields also get a string view. Works on a temporary too, e.g. message.Payload.text_string.'''
-    n = f.array_length
-    if f.type != 'char':
-        return []
+def text_span_name(m, f):
+    '''the raw-bytes span of a char[N] field: <name>_span, or <name>_bytes if a field already uses that'''
+    names = set(fld.name for fld in m.fields)
+    for suffix in ('_span', '_bytes'):
+        if f.name + suffix not in names:
+            return f.name + suffix
+    raise mavparse.MAVParseError('%s.%s: no free name for the raw text span' % (m.name, f.name))
+
+
+def text_span_accessor(m, f, storage):
+    '''the raw bytes of a char[N] field, for callers that need the exact wire content'''
+    span = text_span_name(m, f)
+    if span != f.name + '_span':
+        print('WARNING: %s.%s: %s_span is a field name, so the raw text span is %s' % (m.name, f.name, f.name, span))
     return [
-        '/// <summary><see cref="%s"/> as text: NUL-terminated or full-length, UTF-8. Setting truncates to %u bytes.</summary>' % (ident(f.name).lstrip('@'), n),
-        'public string %s_string' % f.name,
-        '{',
-        '    readonly get { fixed (byte* p = %s) return %s.MavlinkText.Decode(new global::System.ReadOnlySpan<byte>(p, %u)); }' % (storage, CORE, n),
-        '    set { fixed (byte* p = %s) %s.MavlinkText.Encode(value, new global::System.Span<byte>(p, %u)); }' % (storage, CORE, n),
-        '}',
+        '/// <summary>The raw bytes of <see cref="%s"/>: %u bytes, NUL-padded, with no terminator when full.</summary>'
+        % (ident(f.name).lstrip('@'), f.array_length),
+        '[global::System.Diagnostics.CodeAnalysis.UnscopedRef]',
+        'public global::System.Span<byte> %s => global::System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref %s[0], %u);'
+        % (span, storage, f.array_length),
     ]
 
 
@@ -358,6 +382,11 @@ def emit_message(w, m, models, dialect_name):
             doc += ' (%s)' % f.enum
         if f.units:
             doc += ' %s' % xml_doc(f.units)
+        if f.type == 'char' and f.array_length:
+            # Uniform, because the XML descriptions mention the limit only sometimes.
+            if doc and doc[-1] not in '.!?)':
+                doc += '.'
+            doc += ' Text: at most %u bytes of UTF-8, NUL-padded; setting a longer value truncates it.' % f.array_length
         if i >= extensions_start and m.extensions_start is not None:
             doc += ' Extension field: zero when the sender omits it.'
         w('/// <summary>%s</summary>' % doc.strip(), 1)
@@ -380,6 +409,7 @@ def emit_message(w, m, models, dialect_name):
 
 def emit_dialect_class(w, x, ns, class_name, messages, commands):
     w('/// <summary>The <c>%s</c> dialect: the messages and commands %s.xml defines.</summary>' % (x.basename, x.basename))
+    w('/// <remarks>Not registered automatically: call <c>MavlinkRegistry.RegisterDialect(%s.Instance)</c>. Registration order is call order; the last registration wins.</remarks>' % class_name)
     w('public sealed class %s : %s.IMavlinkDialect' % (class_name, CORE))
     w('{')
     w('private %s()' % class_name, 1)
@@ -410,12 +440,6 @@ def emit_dialect_class(w, x, ns, class_name, messages, commands):
     for name, value, desc in commands:
         w('new(%u, "%s", "%s", %s),' % (value, name, x.basename, cs_string(desc) if one_line(desc) else 'null'), 2)
     w('];', 1)
-    w('', 1)
-    w('/// <summary>Registers this dialect when the assembly loads. Identical re-registration is a no-op.</summary>', 1)
-    w('#pragma warning disable CA2255 // ModuleInitializer in a library: registration on load is the point.', 1)
-    w('[global::System.Runtime.CompilerServices.ModuleInitializer]', 1)
-    w('internal static void Register() => %s.MavlinkRegistry.Register(Instance);' % CORE, 1)
-    w('#pragma warning restore CA2255', 1)
     w('}')
 
 
@@ -429,8 +453,6 @@ def generate_file(x, xml_list, models, root, directory):
     w('//   Wire protocol %s. Do not edit: regenerate instead.' % x.wire_protocol_version)
     w('// </auto-generated>')
     w('#nullable enable')
-    w('')
-    w('[assembly: %s.MavlinkDialect(typeof(%s.%s))]' % (CORE, ns, class_name))
     w('')
     w('namespace %s;' % ns)
     w('')
@@ -468,15 +490,82 @@ def generate_file(x, xml_list, models, root, directory):
     print('Generated %s (%s, %u messages)' % (path, ns, len(messages)))
 
 
-def generate(directory, xml_list, emit='all', namespace_root='MavLink.Net'):
-    '''generate split-layout C# for the root file (emit=root) or every file in the include closure (emit=all)'''
+# ---- collisions with other dialects --------------------------------------------------------------
+
+def parse_closure(path, wire_protocol, parsed):
+    '''parse an XML file and everything it includes, once each'''
+    key = norm(path)
+    if key in parsed:
+        return
+    x = mavparse.MAVXML(path, wire_protocol)
+    parsed[key] = x
+    for i in x.include:
+        parse_closure(os.path.join(os.path.dirname(path), i), wire_protocol, parsed)
+
+
+def check_against(targets, xml_list, paths):
+    '''warn, never fail, when a generated message id or MAV_CMD value is defined differently in another
+    dialect. The registry resolves such conflicts at run time (last registration wins), but frames from
+    a peer that uses the other definition then fail CRC, so a build warning is the right level.
+    Returns the number of warnings.'''
+    if not paths:
+        return 0
+    ours = set(norm(x.filename) for x in xml_list)
+    others = {}
+    for p in paths:
+        parse_closure(p, xml_list[0].wire_protocol_version, others)
+
+    their_msgs, their_cmds = {}, {}
+    for key, x in others.items():
+        if key in ours:
+            continue  # a shared include (e.g. common.xml) is the same definition by construction
+        for m in x.message:
+            their_msgs.setdefault(m.id, (m, x))
+        for e in x.enum:
+            if e.name == 'MAV_CMD':
+                for entry in e.entry:
+                    if norm(entry.origin_file or x.filename) not in ours:
+                        their_cmds.setdefault(entry.value, (entry, x))
+
+    warnings = 0
+    for x in targets:
+        for m in x.message:
+            hit = their_msgs.get(m.id)
+            if hit and (hit[0].name != m.name or hit[0].crc_extra != m.crc_extra):
+                print('%s: warning MAVGEN001: message id %u (%s, CRC_EXTRA %u) is also %s (CRC_EXTRA %u) in %s. '
+                      'Use an id unique across dialects; registering both means the last registration wins.'
+                      % (x.filename, m.id, m.name, m.crc_extra, hit[0].name, hit[0].crc_extra, hit[1].filename))
+                warnings += 1
+        for e in x.enum:
+            if e.name != 'MAV_CMD':
+                continue
+            for entry in e.entry:
+                if norm(entry.origin_file or '') != norm(x.filename):
+                    continue
+                hit = their_cmds.get(entry.value)
+                if hit and hit[0].name != entry.name:
+                    print('%s(%u): warning MAVGEN002: MAV_CMD %u (%s) is also %s in %s. '
+                          'Use a command id unique across dialects; registering both means the last registration wins.'
+                          % (x.filename, entry.origin_line, entry.value, entry.name, hit[0].name, hit[1].filename))
+                    warnings += 1
+    return warnings
+
+
+def generate(directory, xml_list, emit='all', namespace_root='MavLink.Net', check_paths=None, root_namespace=None):
+    '''generate split-layout C# for the root file (emit=root) or every file in the include closure (emit=all).
+    root_namespace sets the namespace of the root XML file only, overriding its <namespace> element;
+    included files keep theirs (or the default rule), so an extension dialect's typed fields still
+    refer to the types of the packages that generated its includes.'''
     if not os.path.exists(directory):
         os.makedirs(directory)
+    if root_namespace:
+        xml_list[0].namespace = root_namespace
 
     ordered = include_order(xml_list)
     models = build_enum_models(xml_list)
     assign_owners(models, ordered, namespace_root)
 
     targets = [xml_list[0]] if emit == 'root' else ordered
+    check_against(targets, xml_list, check_paths or [])
     for x in targets:
         generate_file(x, xml_list, models, namespace_root, directory)
