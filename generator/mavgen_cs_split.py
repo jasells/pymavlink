@@ -167,6 +167,7 @@ class EnumModel(object):
         self.uses = set()
         self.underlying = 'int'
         self.owner_namespace = None
+        self.owner_file = None
 
     def entries_from(self, filename):
         key = norm(filename)
@@ -203,23 +204,60 @@ class EnumModel(object):
 
 
 def build_enum_models(xml_list):
+    '''one model per enum name. Underlying types are resolved later, once owners are known.'''
     models = {}
     for x in xml_list:
         for e in x.enum:
             models[e.name] = EnumModel(e)
+    return models
+
+
+def include_closures(xml_list):
+    '''for each file (normalised path): itself plus every file it includes, transitively'''
+    by_name = {norm(x.filename): x for x in xml_list}
+    closures = {}
+
+    def closure(x):
+        key = norm(x.filename)
+        if key in closures:
+            return closures[key]
+        closures[key] = {key}  # guards against include cycles
+        result = {key}
+        for i in x.include:
+            inc = by_name.get(norm(os.path.join(os.path.dirname(x.filename), i)))
+            if inc is not None:
+                result |= closure(inc)
+        closures[key] = result
+        return result
 
     for x in xml_list:
+        closure(x)
+    return closures
+
+
+def resolve_underlying_types(models, xml_list):
+    '''An enum's underlying type comes only from the fields in the closure of the file that defines it
+    (the owner and what it includes), never from files that include the owner. That makes it a property
+    of the enum alone: every package that generates or references it -- MavLink.Net generating common,
+    an extension generating ardupilotmega on top of it -- computes the same width. Counting downstream
+    uses instead let an extension assume a width the referenced (already generated) type doesn't have,
+    which silently corrupts the struct layout (MOUNT_CONFIGURE.mount_mode: uint8_t on the wire, but
+    common's MAV_MOUNT_MODE is int because no common message uses it). A downstream field of another
+    width keeps its wire type and gets the checked _enum accessor.'''
+    closures = include_closures(xml_list)
+    for x in xml_list:
+        here = norm(x.filename)
         for m in x.message:
             for f in m.fields:
-                if f.enum and f.array_length == 0 and f.enum in models:
-                    cs = CS_TYPES[f.type]
-                    if cs in INTEGER_SIZES:
-                        models[f.enum].uses.add(cs)
+                model = models.get(f.enum) if f.enum and f.array_length == 0 else None
+                if model is None or here not in closures.get(model.owner_file, ()):
+                    continue
+                cs = CS_TYPES[f.type]
+                if cs in INTEGER_SIZES:
+                    model.uses.add(cs)
 
     for model in models.values():
         model.resolve_underlying()
-
-    return models
 
 
 def assign_owners(models, ordered, root):
@@ -229,9 +267,11 @@ def assign_owners(models, ordered, root):
         for model in models.values():
             if model.owner_namespace is None and model.entries_from(x.filename):
                 model.owner_namespace = ns
+                model.owner_file = norm(x.filename)
     for model in models.values():
         if model.owner_namespace is None:
             model.owner_namespace = dialect_namespace(ordered[0], root)
+            model.owner_file = norm(ordered[0].filename)
 
 
 # ---- emitters -------------------------------------------------------------------------------------
@@ -564,6 +604,7 @@ def generate(directory, xml_list, emit='all', namespace_root='MavLink.Net', chec
     ordered = include_order(xml_list)
     models = build_enum_models(xml_list)
     assign_owners(models, ordered, namespace_root)
+    resolve_underlying_types(models, xml_list)
 
     targets = [xml_list[0]] if emit == 'root' else ordered
     check_against(targets, xml_list, check_paths or [])
